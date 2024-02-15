@@ -1,0 +1,4 @@
+name = "isshu-trakr"
+assets = [
+    "frontend/dist/*",
+]
