@@ -13,9 +13,31 @@ use clerk_rs::{
 use serde::{Deserialize, Serialize};
 use shuttle_actix_web::ShuttleActixWeb;
 use shuttle_secrets::SecretStore;
+use shuttle_runtime::CustomError;
+use sqlx::{Executor, FromRow, PgPool};
 
 struct AppState {
     client: Clerk,
+    pool: PgPool
+}
+
+#[derive(Serialize, Deserialize, FromRow)]
+struct Issue {
+    id: i32,
+    title: String,
+    description: String,
+    status: String,
+    label: String,
+    author: String,
+}
+
+#[derive(Serialize, Deserialize, FromRow)]
+struct NewIssue {
+    title: String,
+    description: String,
+    status: String,
+    label: String,
+    author: String,
 }
 
 // Get the full user list of everyone who has signed in to this app
@@ -69,26 +91,31 @@ async fn get_user(state: web::Data<AppState>, req: HttpRequest) -> impl Responde
 }
 
 #[shuttle_runtime::main]
-async fn main(
+async fn actix_web(
     #[shuttle_secrets::Secrets] secrets: SecretStore,
+    #[shuttle_shared_db::Postgres] pool: PgPool,
 ) -> ShuttleActixWeb<impl FnOnce(&mut ServiceConfig) + Send + Clone + 'static> {
+    // DB Pool
+    pool.execute(include_str!("../schema.sql"))
+        .await
+        .map_err(CustomError::new)?;
+
+    // Clerk integration
+    let clerk_secret_key = secrets
+        .get("CLERK_SECRET_KEY")
+        .expect("Clerk Secret key is not set");
+    let clerk_config = ClerkConfiguration::new(None, None, Some(clerk_secret_key), None);
+    let client = Clerk::new(clerk_config.clone());
+
+    // Create new app state
+    let state = web::Data::new(AppState { client, pool });
+
     let app_config = move |cfg: &mut ServiceConfig| {
-        let clerk_secret_key = secrets
-            .get("CLERK_SECRET_KEY")
-            .expect("Clerk Secret key is not set");
-        let clerk_config = ClerkConfiguration::new(None, None, Some(clerk_secret_key), None);
-        let client = Clerk::new(clerk_config.clone());
-
-        let state = web::Data::new(AppState { client });
-
         cfg.service(
-            // protect the /api routes with clerk authentication
             web::scope("/api")
                 .wrap(ClerkMiddleware::new(clerk_config, None, true))
-                .service(get_users)
-                .service(get_user),
+                .service(get_user)
         )
-        // serve the build files from the frontend
         .service(actix_files::Files::new("/", "./frontend/dist").index_file("index.html"))
         .app_data(state);
     };
@@ -119,3 +146,4 @@ impl From<clerk_rs::models::user::User> for UserModel {
         }
     }
 }
+
